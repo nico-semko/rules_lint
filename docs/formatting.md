@@ -119,21 +119,27 @@ RULES_LINT_FORMAT_CPUS=8 bazel run //:format.check
   `format_multirun` runs one language at a time by default. With `jobs = 0`, languages run at the same time and their budgets add up.
 - Inside a container, the online CPU count is the host's even when the container has a CPU limit, so set a number there instead of `"auto"`.
 
-With a budget, a language with at least 128 files to format runs as batches of files, up to the budget at a time.
-Duplicate paths are dropped first, so no two batches write the same file.
+With a budget, a language with at least 128 files to format runs as batches of files, up to the budget at a time, if its formatter may run as batches (see below).
+Paths that name the same file are dropped first: a repeated path, `src/a.py` and `./src/a.py` from overlapping arguments, a path through a symlinked directory, and a symlink to a file in the list.
+Hard links to one file are not detected.
 Output is printed in batch order once every batch finishes, so it does not depend on timing.
 Interrupting the run with Ctrl-C, SIGTERM or SIGHUP stops every batch and removes their temporary files.
 
-Only formatters known to write just the files they are given run as batches: buildifier, clang-format, gofmt and gofumpt, ruff and shfmt.
-Others stay serial. For example, rustfmt also formats the modules a file declares, so two batches could write the same file, and a JVM formatter would start a JVM per batch.
-To allow or forbid batches for a language, set `{language}_parallel`:
+A formatter may run as batches only if it writes just the files it is given.
+rules_lint knows this for its built-in ruff, gofumpt and shfmt, given as `@aspect_rules_lint//format:ruff` (`:gofumpt`, `:shfmt`) or as their `@multitool//tools/...` labels, and batches them by default.
+Any other label stays serial, even for a language whose usual formatter is safe, because rules_lint cannot tell which tool the label runs.
+For example, rustfmt also formats the modules a file declares, so two batches could write the same file, and a JVM formatter would start a JVM per batch.
+To allow batches for another formatter, or forbid them for a built-in one, set `{language}_parallel`.
+buildifier and clang-format were checked to write only the files they are given:
 
 ```starlark
 format_multirun(
     name = "format",
     cpus = "auto",
-    javascript = ":prettier",
-    javascript_parallel = True,
+    cc = "@llvm_toolchain_llvm//:bin/clang-format",
+    cc_parallel = True,
+    starlark = "@buildifier_prebuilt//:buildifier",
+    starlark_parallel = True,
 )
 ```
 

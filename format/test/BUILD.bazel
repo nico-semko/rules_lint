@@ -134,16 +134,29 @@ format_multirun(
     name = "format_cpus_auto",
     cpus = "auto",
     go = ":mock_gofmt.sh",
+    go_parallel = True,
     go_thread_env = "MY_THREADS",
     python = ":mock_ruff.sh",
-    python_parallel = False,
     python_thread_env = None,
+)
+
+# Built-in formatters batch by default, through either label for them.
+format_multirun(
+    name = "format_builtin",
+    cpus = "auto",
+    go = "@multitool//tools/gofumpt",
+    python = "//format:ruff",
+    shell = "//format:shfmt",
+    shell_parallel = False,
 )
 
 sh_test(
     name = "format_multirun_args_test",
     srcs = ["format_multirun_args_test.sh"],
     data = [
+        ":format_builtin_Go_with_gofmt",
+        ":format_builtin_Python_with_ruff",
+        ":format_builtin_Shell_with_shfmt",
         ":format_cpus_auto_Go_with_gofmt",
         ":format_cpus_auto_Python_with_ruff",
         ":format_positional_3",

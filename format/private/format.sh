@@ -367,12 +367,70 @@ function run-batches {
   return $code
 }
 
+# dedupe-files prints the paths on stdin, dropping each one that names the same
+# file as an earlier one: git lists a modified file twice, overlapping
+# arguments give `src/a.py` and `./src/a.py`, and a symlinked directory gives a
+# second path. A file is keyed by its directory's physical path (cd -P) and
+# name, after following symlinks to the file itself. Hard links are not
+# detected. Paths keep their order and spelling. Per-file work stays in awk,
+# since a bash loop over 100,000 paths takes seconds.
+function dedupe-files {
+  local tmp code=0
+  tmp=$(mktemp -d)
+  cat > "$tmp/paths"
+  # find prints the given paths that are symlinks, without following them.
+  # Relative paths get a ./ prefix so none is read as a find option.
+  awk '{ print (substr($0, 1, 1) == "/" ? $0 : "./" $0) }' "$tmp/paths" | tr \\n \\0 |
+    xargs -0 -P 4 -n 4096 sh -c 'exec find "$@" -prune -type l -print' _ 2>/dev/null |
+    awk '{ print (substr($0, 1, 1) == "/" ? $0 : substr($0, 3)) }' > "$tmp/links" || true
+  (
+    unset CDPATH
+    local origin="$PWD" link key target hops dir
+    # links: each symlink, then the path it finally points to.
+    while IFS= read -r link; do
+      key="$link" hops=0
+      while [[ -L "$key" ]] && ((hops++ < 40)); do
+        target=$(readlink -- "$key") || break
+        if [[ "$target" == /* || "$key" != */* ]]; then
+          key="$target"
+        else
+          key="${key%/*}/$target"
+        fi
+      done
+      printf '%s\n%s\n' "$link" "$key"
+    done < "$tmp/links" > "$tmp/targets"
+    # dirs: each directory, then its physical path, or ? and the directory
+    # when it does not exist.
+    awk 'FILENAME == ARGV[1] { if (FNR % 2) l = $0; else t[l] = $0; next }
+      { p = ($0 in t) ? t[$0] : $0; n = match(p, /.*\//); d = n ? substr(p, 1, RLENGTH - 1) : "."
+        if (d == "") d = "/"; if (!(d in seen)) { seen[d]; print d } }' "$tmp/targets" "$tmp/paths" |
+      while IFS= read -r dir; do
+        if cd -P -- "$dir" 2>/dev/null; then
+          printf '%s\n%s\n' "$dir" "$PWD"
+          cd -- "$origin" || exit 1
+        else
+          printf '%s\n?%s\n' "$dir" "$dir"
+        fi
+      done > "$tmp/dirs"
+  ) || code=$?
+  if ((code == 0)); then
+    awk 'FILENAME == ARGV[1] { if (FNR % 2) l = $0; else t[l] = $0; next }
+      FILENAME == ARGV[2] { if (FNR % 2) d = $0; else phys[d] = $0; next }
+      { p = ($0 in t) ? t[$0] : $0; n = match(p, /.*\//)
+        d = n ? substr(p, 1, RLENGTH - 1) : "."; if (d == "") d = "/"
+        key = phys[d] "/" (n ? substr(p, RLENGTH + 1) : p)
+        if (!(key in seen)) { seen[key]; print } }' "$tmp/targets" "$tmp/dirs" "$tmp/paths" || code=$?
+  fi
+  rm -rf "$tmp"
+  return "$code"
+}
+
 # format-files <files> <lang> <command...> runs command over files, writing the
 # formatter's stdout to stdout. With a CPU budget, large sets run as parallel
 # batches when $parallel is true: the formatter writes only the files it is
-# given (PARALLEL_SAFE, or {language}_parallel in format_multirun). Duplicate
-# paths are dropped first, since git lists a modified file twice and two
-# batches must not write one file. Formatters that start one thread per CPU get their threads capped to
+# given (PARALLEL_SAFE_LABELS, or {language}_parallel in format_multirun).
+# Paths to the same file are dropped first, so two batches never write one
+# file. Formatters that start one thread per CPU get their threads capped to
 # the budget, and run 4 batches at a time with an equal share each, which was
 # faster than one process with every thread. The formatter's thread variable
 # is $thread_env, from THREAD_ENV or {language}_thread_env in format_multirun.
@@ -399,7 +457,7 @@ function format-files {
     echo "$files" | tr \\n \\0 | xargs -0 "$@"
     return
   fi
-  files=$(awk '!seen[$0]++' <<< "$files")
+  files=$(dedupe-files <<< "$files")
   count=$(grep -c '' <<< "$files")
   if [ -n "$var" ]; then
     jobs=$((budget < 4 ? budget : 4))

@@ -125,6 +125,36 @@ assert_files "duplicates in batches" "$out" "$files"
 # Without a budget the formatter gets the list as before.
 [[ "$(grep -vc '^call' <<<"$(format-files "$dups" Shell "$mock")")" == 2001 ]] || fail "the serial path should keep its input"
 
+# Different paths to one file are dropped too: overlapping directory arguments,
+# a symlinked directory, .., // and a symlink to a file. The first spelling is
+# kept.
+mkdir -p alias/src/sub alias/-dir
+(cd alias && for f in $(numbered src/f 200) $(numbered -dir/f 2); do : >"$f"; done)
+ln -s src alias/link
+ln -s f0001.txt alias/src/symlink.txt
+ln -s ../f0002.txt alias/src/sub/up.txt
+first=$(numbered src/f 200 && numbered -dir/f 2)
+aliases=$(
+    echo "$first"
+    numbered ./src/f 200
+    numbered link/f 200
+    numbered src/sub/../f 200
+    numbered src//f 200
+    numbered ./-dir/f 2
+    echo src/symlink.txt
+    echo src/sub/up.txt
+    echo "$TEST_TMPDIR/alias/src/f0003.txt"
+)
+out=$(cd alias && parallel=true cpus=2 format-files "$aliases" Shell "$mock")
+assert_files "aliased paths in batches" "$out" "$first"
+# The same through find, given overlapping directories.
+for f in $(numbered alias/src/f 200); do mv "$f" "${f%.txt}.py"; done
+out=$(cd alias && disable_git_attribute_checks=true && found=$(ls-files Python src ./src link/) &&
+    parallel=true cpus=2 format-files "$found" Python "$mock")
+(($(calls "$out") > 1)) || fail "overlapping directory arguments should still run as batches"
+[[ "$(grep -v '^call' <<<"$out" | sed 's|.*/||' | LC_ALL=C sort)" == "$(numbered f 200 | sed 's|\.txt$|.py|')" ]] ||
+    fail "overlapping directory arguments should format each file once, got $(grep -vc '^call' <<<"$out") paths"
+
 # Threaded formatters: 4 batches at a time, each capped to a share of the budget.
 grep -q 'RAYON_NUM_THREADS=2 ' <<<"$(parallel=true thread_env=RAYON_NUM_THREADS cpus=8 format-files "$files" Python "$mock")" || fail "Python should get RAYON_NUM_THREADS=2"
 grep -q 'GOMAXPROCS=4$' <<<"$(parallel=true thread_env=GOMAXPROCS cpus=16 format-files "$files" Go "$mock")" || fail "Go should get GOMAXPROCS=4"

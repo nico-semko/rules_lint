@@ -60,19 +60,20 @@ THREAD_ENV = {
     "ruff": "RAYON_NUM_THREADS",
 }
 
-# Tools that may run as parallel batches when format_multirun has a CPU budget.
-# Each writes only the files it is given and keeps no shared state that
-# concurrent runs could corrupt, which was checked with the real tool. Others
-# stay serial: rustfmt also formats the modules a file declares, so two batches
-# could write one file, and JVM formatters would start a JVM per batch. A
-# format_multirun `{language}_parallel` argument overrides this for a language.
-PARALLEL_SAFE = [
-    "buildifier",
-    "clang-format",
-    # Also gofumpt, the built-in Go formatter.
-    "gofmt",
-    "ruff",
-    "shfmt",
+# Built-in tools that run as parallel batches when format_multirun has a CPU
+# budget. Each writes only the files it is given, which was checked with the
+# real tool. Any other label may be a tool that writes more: rustfmt also
+# formats the modules a file declares, so two batches could write one file.
+# Those batch only with a format_multirun `{language}_parallel = True`
+# argument. The list holds both the multitool label and the
+# @aspect_rules_lint//format alias for it.
+PARALLEL_SAFE_LABELS = [
+    label
+    for lang in ["Go", "Python", "Shell"]
+    for label in [
+        Label(BUILTIN_TOOL_LABELS[lang]),
+        Label("//format:" + BUILTIN_TOOL_LABELS[lang].split("/")[-1]),
+    ]
 ]
 
 # Flags to pass each tool's CLI when running in check mode

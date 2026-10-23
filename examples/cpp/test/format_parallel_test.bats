@@ -49,4 +49,8 @@ function reported() {
 
 	RULES_LINT_FORMAT_CPUS=4 run bazel run //tools/format:format.check -- "$root/parallel"
 	assert_success
+
+	# cc_parallel = True in tools/format/BUILD, so the runs above used batches.
+	run grep -c "export parallel='true'" "$(bazel info bazel-bin)/tools/format/format_C++_with_clang-format.bash"
+	assert_output 1
 }

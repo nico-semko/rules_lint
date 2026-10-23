@@ -18,7 +18,7 @@ load("@bazel_lib//lib:lists.bzl", "unique")
 load("@bazel_lib//lib:utils.bzl", "propagate_common_rule_attributes", "propagate_common_test_rule_attributes")
 load("@rules_multirun//:defs.bzl", "command", "multirun")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
-load("//format/private:formatter_binary.bzl", "BUILTIN_TOOL_LABELS", "CHECK_FLAGS", "FIX_FLAGS", "PARALLEL_SAFE", "THREAD_ENV", "TOOLS", "to_attribute_name")
+load("//format/private:formatter_binary.bzl", "BUILTIN_TOOL_LABELS", "CHECK_FLAGS", "FIX_FLAGS", "PARALLEL_SAFE_LABELS", "THREAD_ENV", "TOOLS", "to_attribute_name")
 
 def _format_attr_factory(target_name, lang, toolname, tool_label, mode, disable_git_attribute_checks, custom_args = None, fix_target_label = None, cpus = None):
     if mode not in ["check", "fix", "test"]:
@@ -40,7 +40,7 @@ def _format_attr_factory(target_name, lang, toolname, tool_label, mode, disable_
     thread_env = THREAD_ENV.get(toolname, "")
     if custom_args and "thread_env" in custom_args:
         thread_env = custom_args["thread_env"] or ""
-    parallel = toolname in PARALLEL_SAFE
+    parallel = native.package_relative_label(tool_label) in PARALLEL_SAFE_LABELS
     if custom_args and "parallel" in custom_args:
         parallel = custom_args["parallel"]
 
@@ -113,11 +113,12 @@ def format_multirun(name, jobs = 4, print_command = False, disable_git_attribute
         disable_git_attribute_checks: Set to True to disable honoring .gitattributes filters
         cpus: CPU budget for each language's formatter, separately: a positive integer, or `"auto"`
             for min(online CPUs, 16). `None`, the default, runs every formatter serially with no
-            thread caps. With a budget, a formatter in PARALLEL_SAFE runs a large file set as
-            parallel batches, and one that starts a thread per CPU gets its THREAD_ENV variable
-            capped, unless that variable is already set. The budget sets how many processes and
-            threads start; it is not enforced as a CPU limit. The `RULES_LINT_FORMAT_CPUS`
-            environment variable, a positive integer or `auto`, overrides it at run time. See
+            thread caps. With a budget, a large file set runs as parallel batches if the language
+            uses a built-in formatter in PARALLEL_SAFE_LABELS or sets `{language}_parallel = True`.
+            A formatter that starts a thread per CPU gets its THREAD_ENV variable capped, unless
+            that variable is already set. The budget sets how many processes and threads start;
+            it is not enforced as a CPU limit. The `RULES_LINT_FORMAT_CPUS` environment variable,
+            a positive integer or `auto`, overrides it at run time. See
             "Formatter parallelism" in docs/formatting.md.
         **kwargs: attributes named for each language; see [languages](#rule-languages).
             Additionally supports custom arguments via {language}_fix_args and {language}_check_args

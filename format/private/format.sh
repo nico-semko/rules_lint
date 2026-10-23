@@ -307,21 +307,58 @@ function cpu-budget {
   fi
 }
 
+# stop-batches <signal> runs when run-batches is interrupted. It stops every
+# formatter so none keeps writing files after this script exits, removes the
+# batch files, restores the caller's traps and re-raises the signal.
+function stop-batches {
+  local i
+  # format.sh runs with errexit, and the group may already be gone.
+  kill -TERM -"$RUN_BATCHES_PID" 2>/dev/null || true
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 -"$RUN_BATCHES_PID" 2>/dev/null || break
+    sleep 0.2
+  done
+  kill -KILL -"$RUN_BATCHES_PID" 2>/dev/null || true
+  wait "$RUN_BATCHES_PID" 2>/dev/null || true
+  rm -rf "$RUN_BATCHES_DIR"
+  trap - INT TERM HUP
+  eval "$RUN_BATCHES_TRAPS"
+  kill -"$1" "$RUN_BATCHES_SELF"
+}
+
 # run-batches <files> <jobs> <batch> <command...> runs command over files in
 # batches of <batch> files, <jobs> batches at a time. Each batch's stdout and
 # stderr are printed in batch order after all batches finish, so output from
 # different batches never interleaves and does not depend on timing. Fails like
 # xargs when any batch fails.
+#
+# The batches run in their own process group, so stop-batches can signal every
+# formatter at once. `kill -SIG -PGID` is the form bash 3.2's kill builtin
+# accepts.
 function run-batches {
   local files="$1" jobs="$2" batch="$3" && shift 3
-  local dir f code=0
+  local dir f code=0 monitor=0
   dir=$(mktemp -d)
   echo "$files" | split -l "$batch" -a 4 - "$dir/batch."
-  printf '%s\0' "$dir"/batch.* | xargs -0 -n 1 -P "$jobs" bash -c '
+  printf '%s\0' "$dir"/batch.* > "$dir/batches"
+  [[ $- == *m* ]] && monitor=1
+  set -m
+  xargs -0 -n 1 -P "$jobs" bash -c '
     set -o pipefail
     f="${!#}"
     tr "\n" "\0" < "$f" | xargs -0 "${@:1:$#-1}" > "$f.out" 2> "$f.err"
-  ' _ "$@" || code=$?
+  ' _ "$@" < "$dir/batches" &
+  RUN_BATCHES_PID=$!
+  ((monitor)) || set +m
+  RUN_BATCHES_DIR=$dir
+  RUN_BATCHES_SELF=$(exec sh -c 'echo $PPID')
+  RUN_BATCHES_TRAPS=$(trap -p INT TERM HUP)
+  trap 'stop-batches INT' INT
+  trap 'stop-batches TERM' TERM
+  trap 'stop-batches HUP' HUP
+  wait "$RUN_BATCHES_PID" || code=$?
+  trap - INT TERM HUP
+  eval "$RUN_BATCHES_TRAPS"
   for f in "$dir"/batch.????; do
     cat "$f.out"
     cat "$f.err" >&2
@@ -332,7 +369,10 @@ function run-batches {
 
 # format-files <files> <lang> <command...> runs command over files, writing the
 # formatter's stdout to stdout. With a CPU budget, large sets run as parallel
-# batches. Formatters that start one thread per CPU get their threads capped to
+# batches when $parallel is true: the formatter writes only the files it is
+# given (PARALLEL_SAFE, or {language}_parallel in format_multirun). Duplicate
+# paths are dropped first, since git lists a modified file twice and two
+# batches must not write one file. Formatters that start one thread per CPU get their threads capped to
 # the budget, and run 4 batches at a time with an equal share each, which was
 # faster than one process with every thread. The formatter's thread variable
 # is $thread_env, from THREAD_ENV or {language}_thread_env in format_multirun.
@@ -347,11 +387,10 @@ function format-files {
   fi
   var="${thread_env:-}"
   [[ "$var" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || var=""
-  case "$lang" in
-    # Each batch would start its own JVM.
-    Java|Kotlin|Scala) jobs=1 ;;
-    *) jobs=$budget ;;
-  esac
+  jobs=1
+  if [[ "${parallel:-false}" == true ]]; then
+    jobs=$budget
+  fi
   count=$(grep -c '' <<< "$files")
   if ((jobs < 2 || count < 2 * MIN_PARALLEL_BATCH)); then
     if [ -n "$var" ] && [ -z "${!var:-}" ]; then
@@ -360,6 +399,8 @@ function format-files {
     echo "$files" | tr \\n \\0 | xargs -0 "$@"
     return
   fi
+  files=$(awk '!seen[$0]++' <<< "$files")
+  count=$(grep -c '' <<< "$files")
   if [ -n "$var" ]; then
     jobs=$((budget < 4 ? budget : 4))
     if [ -z "${!var:-}" ]; then

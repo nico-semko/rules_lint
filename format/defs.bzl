@@ -18,7 +18,7 @@ load("@bazel_lib//lib:lists.bzl", "unique")
 load("@bazel_lib//lib:utils.bzl", "propagate_common_rule_attributes", "propagate_common_test_rule_attributes")
 load("@rules_multirun//:defs.bzl", "command", "multirun")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
-load("//format/private:formatter_binary.bzl", "BUILTIN_TOOL_LABELS", "CHECK_FLAGS", "FIX_FLAGS", "THREAD_ENV", "TOOLS", "to_attribute_name")
+load("//format/private:formatter_binary.bzl", "BUILTIN_TOOL_LABELS", "CHECK_FLAGS", "FIX_FLAGS", "PARALLEL_SAFE", "THREAD_ENV", "TOOLS", "to_attribute_name")
 
 def _format_attr_factory(target_name, lang, toolname, tool_label, mode, disable_git_attribute_checks, custom_args = None, fix_target_label = None, cpus = None):
     if mode not in ["check", "fix", "test"]:
@@ -40,6 +40,9 @@ def _format_attr_factory(target_name, lang, toolname, tool_label, mode, disable_
     thread_env = THREAD_ENV.get(toolname, "")
     if custom_args and "thread_env" in custom_args:
         thread_env = custom_args["thread_env"] or ""
+    parallel = toolname in PARALLEL_SAFE
+    if custom_args and "parallel" in custom_args:
+        parallel = custom_args["parallel"]
 
     # this dict is used to create the attributes both to pass to command() (for
     # format_multirun) and to sh_test() (for format_test, so it has to toggle
@@ -58,6 +61,7 @@ def _format_attr_factory(target_name, lang, toolname, tool_label, mode, disable_
             "disable_git_attribute_checks": "true" if disable_git_attribute_checks else "false",
             "cpus": str(cpus) if cpus else "none",
             "thread_env": thread_env,
+            "parallel": "true" if parallel else "false",
         },
         "data": [tool_label],
         ("args" if mode == "test" else "arguments"): args,
@@ -107,18 +111,20 @@ def format_multirun(name, jobs = 4, print_command = False, disable_git_attribute
         print_command: whether to print a progress message before calling the formatter of each language.
             Note that a line is printed for a formatter even if no files of that language are to be formatted.
         disable_git_attribute_checks: Set to True to disable honoring .gitattributes filters
-        cpus: how many CPUs each language's formatter may use: a positive integer, or `"auto"` for
-            min(online CPUs, 16). With enough files, a formatter runs as several processes over
-            batches of files. Go and Python formatters get their threads capped to the budget, or
-            to a share of it per batch, unless GOMAXPROCS or RAYON_NUM_THREADS is already set.
-            `None` runs every formatter as one serial process with no thread caps. The
-            `RULES_LINT_FORMAT_CPUS` environment variable overrides this at run time, for example
-            in CI.
+        cpus: CPU budget for each language's formatter, separately: a positive integer, or `"auto"`
+            for min(online CPUs, 16). `None`, the default, runs every formatter serially with no
+            thread caps. With a budget, a formatter in PARALLEL_SAFE runs a large file set as
+            parallel batches, and one that starts a thread per CPU gets its THREAD_ENV variable
+            capped, unless that variable is already set. The budget sets how many processes and
+            threads start; it is not enforced as a CPU limit. The `RULES_LINT_FORMAT_CPUS`
+            environment variable, a positive integer or `auto`, overrides it at run time. See
+            "Formatter parallelism" in docs/formatting.md.
         **kwargs: attributes named for each language; see [languages](#rule-languages).
             Additionally supports custom arguments via {language}_fix_args and {language}_check_args
             to override default formatter flags for fix and check modes respectively, and
             {language}_thread_env to name the environment variable that caps the formatter's
-            threads (`None` for none), for a formatter that starts one thread per CPU.
+            threads (`None` for none), for a formatter that starts one thread per CPU, and
+            {language}_parallel to allow or forbid parallel batches for that language's formatter.
     """
     if cpus != None and cpus != "auto" and (type(cpus) != "int" or cpus < 1):
         fail("cpus must be None, \"auto\" or a positive integer, got", cpus)
@@ -260,6 +266,7 @@ def _tools_loop(name, kwargs):
             kwargs.pop(lang_attribute + "_fix_args", None)
             kwargs.pop(lang_attribute + "_check_args", None)
             kwargs.pop(lang_attribute + "_thread_env", None)
+            kwargs.pop(lang_attribute + "_parallel", None)
             continue
 
         tool_label = kwargs.pop(lang_attribute)
@@ -278,6 +285,11 @@ def _tools_loop(name, kwargs):
             if thread_env != None and not _is_env_name(thread_env):
                 fail("{}_thread_env must be None or an environment variable name, got {}".format(lang_attribute, thread_env))
             custom_args["thread_env"] = thread_env
+        if lang_attribute + "_parallel" in kwargs:
+            parallel = kwargs.pop(lang_attribute + "_parallel")
+            if type(parallel) != "bool":
+                fail("{}_parallel must be True or False, got {}".format(lang_attribute, parallel))
+            custom_args["parallel"] = parallel
 
         result.append((lang, toolname, tool_label, target_name, custom_args if custom_args else None))
 
@@ -287,7 +299,7 @@ def _tools_loop(name, kwargs):
         valid_custom_attrs = []
         for lang in TOOLS.keys():
             lang_attribute = to_attribute_name(lang)
-            valid_custom_attrs.extend([lang_attribute + "_fix_args", lang_attribute + "_check_args", lang_attribute + "_thread_env"])
+            valid_custom_attrs.extend([lang_attribute + "_fix_args", lang_attribute + "_check_args", lang_attribute + "_thread_env", lang_attribute + "_parallel"])
         fail("""Unknown attributes: {}. Valid language attributes: {}. Valid custom argument attributes: {}""".format(
             list(kwargs.keys()),
             valid_attrs,

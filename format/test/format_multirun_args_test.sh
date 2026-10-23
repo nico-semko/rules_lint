@@ -25,4 +25,10 @@ grep -q "export thread_env='RAYON_NUM_THREADS'" "$dir/format_positional_4_Python
 grep -q "export thread_env=''" "$dir/format_cpus_auto_Python_with_ruff.bash" || fail "python_thread_env = None should clear it"
 grep -q "export thread_env='MY_THREADS'" "$dir/format_cpus_auto_Go_with_gofmt.bash" || fail "go_thread_env should replace GOMAXPROCS"
 
+# Parallel batches come from PARALLEL_SAFE, and {language}_parallel replaces it.
+grep -q "export parallel='true'" "$dir/format_positional_4_Python_with_ruff.bash" || fail "ruff should be parallel-safe"
+grep -q "export parallel='true'" "$dir/format_cpus_auto_Go_with_gofmt.bash" || fail "gofmt should be parallel-safe"
+grep -q "export parallel='false'" "$dir/format_cpus_auto_Python_with_ruff.bash" || fail "python_parallel = False should turn batches off"
+grep -q "export parallel='false'" "$dir/format_with_custom_args_Java_with_java-format.bash" || fail "java-format should not be parallel-safe"
+
 echo "PASS"

@@ -12,6 +12,24 @@ sh_test(
 )
 
 sh_test(
+    name = "real_formatters_test",
+    srcs = ["real_formatters_test.sh"],
+    data = [
+        "//format/private:format",
+        "@buildifier_prebuilt//:buildifier",
+        "@multitool//tools/gofumpt",
+        "@multitool//tools/ruff",
+        "@multitool//tools/shfmt",
+    ],
+    env = {
+        "BUILDIFIER": "$(rlocationpath @buildifier_prebuilt//:buildifier)",
+        "GOFUMPT": "$(rlocationpath @multitool//tools/gofumpt)",
+        "RUFF": "$(rlocationpath @multitool//tools/ruff)",
+        "SHFMT": "$(rlocationpath @multitool//tools/shfmt)",
+    },
+)
+
+sh_test(
     name = "parallel_test",
     srcs = ["parallel_test.sh"],
     data = ["//format/private:format"],
@@ -118,6 +136,7 @@ format_multirun(
     go = ":mock_gofmt.sh",
     go_thread_env = "MY_THREADS",
     python = ":mock_ruff.sh",
+    python_parallel = False,
     python_thread_env = None,
 )
 
@@ -131,6 +150,7 @@ sh_test(
         ":format_positional_3_Python_with_ruff",
         ":format_positional_4",
         ":format_positional_4_Python_with_ruff",
+        ":format_with_custom_args_Java_with_java-format",
     ],
 )
 

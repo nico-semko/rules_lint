@@ -60,6 +60,21 @@ THREAD_ENV = {
     "ruff": "RAYON_NUM_THREADS",
 }
 
+# Tools that may run as parallel batches when format_multirun has a CPU budget.
+# Each writes only the files it is given and keeps no shared state that
+# concurrent runs could corrupt, which was checked with the real tool. Others
+# stay serial: rustfmt also formats the modules a file declares, so two batches
+# could write one file, and JVM formatters would start a JVM per batch. A
+# format_multirun `{language}_parallel` argument overrides this for a language.
+PARALLEL_SAFE = [
+    "buildifier",
+    "clang-format",
+    # Also gofumpt, the built-in Go formatter.
+    "gofmt",
+    "ruff",
+    "shfmt",
+]
+
 # Flags to pass each tool's CLI when running in check mode
 CHECK_FLAGS = {
     "buildifier": "-mode=check",

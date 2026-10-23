@@ -94,7 +94,7 @@ format_multirun(
 )
 
 # format_multirun keeps its positional arguments: name, jobs, print_command,
-# disable_git_attribute_checks. positional_args_test checks what they set.
+# disable_git_attribute_checks. format_multirun_args_test checks what they set.
 # buildifier: disable=positional-args
 format_multirun(
     "format_positional_3",
@@ -112,10 +112,21 @@ format_multirun(
     python = ":mock_ruff.sh",
 )
 
+format_multirun(
+    name = "format_cpus_auto",
+    cpus = "auto",
+    go = ":mock_gofmt.sh",
+    go_thread_env = "MY_THREADS",
+    python = ":mock_ruff.sh",
+    python_thread_env = None,
+)
+
 sh_test(
-    name = "positional_args_test",
-    srcs = ["positional_args_test.sh"],
+    name = "format_multirun_args_test",
+    srcs = ["format_multirun_args_test.sh"],
     data = [
+        ":format_cpus_auto_Go_with_gofmt",
+        ":format_cpus_auto_Python_with_ruff",
         ":format_positional_3",
         ":format_positional_3_Python_with_ruff",
         ":format_positional_4",

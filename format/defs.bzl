@@ -18,7 +18,7 @@ load("@bazel_lib//lib:lists.bzl", "unique")
 load("@bazel_lib//lib:utils.bzl", "propagate_common_rule_attributes", "propagate_common_test_rule_attributes")
 load("@rules_multirun//:defs.bzl", "command", "multirun")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
-load("//format/private:formatter_binary.bzl", "BUILTIN_TOOL_LABELS", "CHECK_FLAGS", "FIX_FLAGS", "TOOLS", "to_attribute_name")
+load("//format/private:formatter_binary.bzl", "BUILTIN_TOOL_LABELS", "CHECK_FLAGS", "FIX_FLAGS", "THREAD_ENV", "TOOLS", "to_attribute_name")
 
 def _format_attr_factory(target_name, lang, toolname, tool_label, mode, disable_git_attribute_checks, custom_args = None, fix_target_label = None, cpus = None):
     if mode not in ["check", "fix", "test"]:
@@ -37,6 +37,10 @@ def _format_attr_factory(target_name, lang, toolname, tool_label, mode, disable_
         elif mode in ["check", "test"] and "check_args" in custom_args:
             flags = " ".join(custom_args["check_args"])
 
+    thread_env = THREAD_ENV.get(toolname, "")
+    if custom_args and "thread_env" in custom_args:
+        thread_env = custom_args["thread_env"] or ""
+
     # this dict is used to create the attributes both to pass to command() (for
     # format_multirun) and to sh_test() (for format_test, so it has to toggle
     # between different attr names ("env" vs "environment", "args" vs
@@ -52,7 +56,8 @@ def _format_attr_factory(target_name, lang, toolname, tool_label, mode, disable_
             "flags": flags,
             "mode": "check" if mode == "test" else mode,
             "disable_git_attribute_checks": "true" if disable_git_attribute_checks else "false",
-            "cpus": str(cpus) if cpus else "auto",
+            "cpus": str(cpus) if cpus else "none",
+            "thread_env": thread_env,
         },
         "data": [tool_label],
         ("args" if mode == "test" else "arguments"): args,
@@ -102,17 +107,21 @@ def format_multirun(name, jobs = 4, print_command = False, disable_git_attribute
         print_command: whether to print a progress message before calling the formatter of each language.
             Note that a line is printed for a formatter even if no files of that language are to be formatted.
         disable_git_attribute_checks: Set to True to disable honoring .gitattributes filters
-        cpus: how many CPUs each language's formatter may use. With enough files, a formatter runs as
-            several processes over batches of files. Go and Python formatters get their threads
-            capped to the budget, or to a share of it per batch. `None` uses min(online CPUs, 16);
-            `1` runs every formatter as one process with one thread. The `RULES_LINT_FORMAT_CPUS`
-            environment variable overrides this at run time, for example in CI.
+        cpus: how many CPUs each language's formatter may use: a positive integer, or `"auto"` for
+            min(online CPUs, 16). With enough files, a formatter runs as several processes over
+            batches of files. Go and Python formatters get their threads capped to the budget, or
+            to a share of it per batch, unless GOMAXPROCS or RAYON_NUM_THREADS is already set.
+            `None` runs every formatter as one serial process with no thread caps. The
+            `RULES_LINT_FORMAT_CPUS` environment variable overrides this at run time, for example
+            in CI.
         **kwargs: attributes named for each language; see [languages](#rule-languages).
             Additionally supports custom arguments via {language}_fix_args and {language}_check_args
-            to override default formatter flags for fix and check modes respectively.
+            to override default formatter flags for fix and check modes respectively, and
+            {language}_thread_env to name the environment variable that caps the formatter's
+            threads (`None` for none), for a formatter that starts one thread per CPU.
     """
-    if cpus != None and (type(cpus) != "int" or cpus < 1):
-        fail("cpus must be None or a positive integer, got", cpus)
+    if cpus != None and cpus != "auto" and (type(cpus) != "int" or cpus < 1):
+        fail("cpus must be None, \"auto\" or a positive integer, got", cpus)
 
     commands = []
 
@@ -203,8 +212,8 @@ def format_test(name, srcs = None, workspace = None, no_sandbox = False, disable
         if fix_label:
             fix_target_label = "//{}:{}".format(fix_label.package, _format_target_name(fix_label.name, lang, toolname))
 
-        # Bazel already runs tests in parallel, so each test runs its formatter as one process,
-        # whatever RULES_LINT_FORMAT_CPUS says.
+        # Bazel already runs tests in parallel, so each test runs its formatter as one serial
+        # process with no thread caps, whatever RULES_LINT_FORMAT_CPUS says.
         attrs = _format_attr_factory(target_name, lang, toolname, tool_label, "test", disable_git_attribute_checks, custom_args, fix_target_label = fix_target_label, cpus = "serial")
         if srcs_label:
             attrs["data"] = [tool_label, srcs_label]
@@ -230,6 +239,15 @@ def _format_target_name(name, lang, toolname):
     """Name of the per-language target created by format_multirun and format_test."""
     return "_".join([name, lang.replace(" ", "_"), "with", toolname])
 
+def _is_env_name(value):
+    """Whether value is a valid environment variable name, such as GOMAXPROCS."""
+    if type(value) != "string" or not value or value[0].isdigit():
+        return False
+    for c in value.elems():
+        if not (c.isalnum() or c == "_"):
+            return False
+    return True
+
 def _tools_loop(name, kwargs):
     result = []
 
@@ -241,6 +259,7 @@ def _tools_loop(name, kwargs):
             kwargs.pop(lang_attribute, None)
             kwargs.pop(lang_attribute + "_fix_args", None)
             kwargs.pop(lang_attribute + "_check_args", None)
+            kwargs.pop(lang_attribute + "_thread_env", None)
             continue
 
         tool_label = kwargs.pop(lang_attribute)
@@ -254,6 +273,11 @@ def _tools_loop(name, kwargs):
             custom_args["fix_args"] = fix_args
         if check_args:
             custom_args["check_args"] = check_args
+        if lang_attribute + "_thread_env" in kwargs:
+            thread_env = kwargs.pop(lang_attribute + "_thread_env")
+            if thread_env != None and not _is_env_name(thread_env):
+                fail("{}_thread_env must be None or an environment variable name, got {}".format(lang_attribute, thread_env))
+            custom_args["thread_env"] = thread_env
 
         result.append((lang, toolname, tool_label, target_name, custom_args if custom_args else None))
 
@@ -263,7 +287,7 @@ def _tools_loop(name, kwargs):
         valid_custom_attrs = []
         for lang in TOOLS.keys():
             lang_attribute = to_attribute_name(lang)
-            valid_custom_attrs.extend([lang_attribute + "_fix_args", lang_attribute + "_check_args"])
+            valid_custom_attrs.extend([lang_attribute + "_fix_args", lang_attribute + "_check_args", lang_attribute + "_thread_env"])
         fail("""Unknown attributes: {}. Valid language attributes: {}. Valid custom argument attributes: {}""".format(
             list(kwargs.keys()),
             valid_attrs,

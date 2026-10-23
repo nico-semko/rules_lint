@@ -50,6 +50,16 @@ BUILTIN_TOOL_LABELS = {
     "Python": "@multitool//tools/ruff",
 }
 
+# Environment variable that caps the threads of tools that start one thread per
+# CPU. With a CPU budget, format.sh sets it to the budget, or to a share of it
+# per batch, unless the caller already set it. A format_multirun
+# `{language}_thread_env` argument replaces the entry for that language.
+THREAD_ENV = {
+    # Also gofumpt, the built-in Go formatter.
+    "gofmt": "GOMAXPROCS",
+    "ruff": "RAYON_NUM_THREADS",
+}
+
 # Flags to pass each tool's CLI when running in check mode
 CHECK_FLAGS = {
     "buildifier": "-mode=check",

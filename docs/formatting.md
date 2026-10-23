@@ -96,21 +96,14 @@ If not specified, the built-in defaults for each formatter are used.
 
 ### Formatter parallelism
 
-When a language has at least 128 files to format, its formatter runs as several processes over batches of files.
-Each language may use up to `cpus` CPUs, which defaults to the number of online CPUs, at most 16.
-Output is printed in batch order once every batch finishes, so it does not depend on timing.
-
-gofmt, gofumpt and ruff start one thread per CPU, so their threads are capped to the budget: `GOMAXPROCS` for Go, `RAYON_NUM_THREADS` for Python.
-With enough files they run 4 batches at a time, each capped to an equal share.
-Java, Kotlin and Scala formatters always run as one process, since each batch would start its own JVM.
-
-Set the budget in `format_multirun`, or with the `RULES_LINT_FORMAT_CPUS` environment variable when you run it, which takes precedence:
+By default each formatter runs as one serial process over all its files.
+Give it a CPU budget with `cpus` in `format_multirun`, or with the `RULES_LINT_FORMAT_CPUS` environment variable when you run it, which takes precedence.
+Both take a number of CPUs or `"auto"`, which is the number of online CPUs, at most 16.
 
 ```starlark
 format_multirun(
     name = "format",
-    # Run each formatter as one process with one thread.
-    cpus = 1,
+    cpus = "auto",
     python = "@aspect_rules_lint//format:ruff",
 )
 ```
@@ -119,9 +112,27 @@ format_multirun(
 RULES_LINT_FORMAT_CPUS=8 bazel run //:format.check
 ```
 
-Inside a container, the online CPU count is the host's even when the container has a CPU limit.
-Set `cpus` or `RULES_LINT_FORMAT_CPUS` to the limit there.
-`format_test` always runs each formatter as one process, even with `RULES_LINT_FORMAT_CPUS` set, because Bazel already runs tests in parallel.
+With a budget, a language with at least 128 files to format runs as several processes over batches of files, up to the budget at a time.
+Output is printed in batch order once every batch finishes, so it does not depend on timing.
+
+Formatters that start one thread per CPU get their threads capped to the budget through an environment variable: `GOMAXPROCS` for gofmt and gofumpt, `RAYON_NUM_THREADS` for ruff.
+With enough files they run 4 batches at a time, each capped to an equal share.
+A value already set in the environment is kept.
+For a different formatter, name its variable with `{language}_thread_env`, or set it to `None` for none:
+
+```starlark
+format_multirun(
+    name = "format",
+    cpus = "auto",
+    python = ":black",
+    python_thread_env = None,
+)
+```
+
+Java, Kotlin and Scala formatters always run as one process, since each batch would start its own JVM.
+
+Inside a container, the online CPU count is the host's even when the container has a CPU limit, so set the budget to the limit there instead of `"auto"`.
+`format_test` always runs each formatter as one serial process, even with `RULES_LINT_FORMAT_CPUS` set, because Bazel already runs tests in parallel.
 
 ### One-time re-format all files
 

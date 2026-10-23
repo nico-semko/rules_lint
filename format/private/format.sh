@@ -280,34 +280,31 @@ function ls-files {
 # from extra processes.
 MIN_PARALLEL_BATCH=64
 
-# cpu-budget prints how many CPUs one language's formatter may use:
-# RULES_LINT_FORMAT_CPUS from the caller's environment, else the `cpus` argument
-# of format_multirun, else min(online CPUs, 16). Inside a container the online
-# CPU count is the host's even when the container has a CPU limit, and the
-# formatters measured were no faster past 16. format_test sets cpus=serial,
-# which the override cannot change, because Bazel already runs tests in parallel.
+# cpu-budget prints how many CPUs one language's formatter may use, or 0 to run
+# it as one serial xargs call with no thread caps. RULES_LINT_FORMAT_CPUS in the
+# caller's environment wins over the `cpus` argument of format_multirun. Both
+# take a positive number or "auto", which is min(online CPUs, 16): inside a
+# container the online CPU count is the host's even under a CPU limit, and the
+# formatters measured were no faster past 16. format_test sets cpus=serial, which
+# the override cannot change, because Bazel already runs tests in parallel.
 function cpu-budget {
-  if [[ "${cpus:-}" == serial ]]; then
-    echo 1
+  local n="${cpus:-none}"
+  if [[ "$n" == serial ]]; then
+    echo 0
     return
   fi
-  local n="${RULES_LINT_FORMAT_CPUS:-${cpus:-auto}}"
-  if [[ "$n" =~ ^[1-9][0-9]*$ ]]; then
+  if [[ "${RULES_LINT_FORMAT_CPUS:-}" =~ ^([1-9][0-9]*|auto)$ ]]; then
+    n="$RULES_LINT_FORMAT_CPUS"
+  fi
+  if [[ "$n" == auto ]]; then
+    n=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)
+    [[ "$n" =~ ^[1-9][0-9]*$ ]] || n=1
+    echo $((n > 16 ? 16 : n))
+  elif [[ "$n" =~ ^[1-9][0-9]*$ ]]; then
     echo "$n"
-    return
+  else
+    echo 0
   fi
-  n=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)
-  [[ "$n" =~ ^[1-9][0-9]*$ ]] || n=1
-  echo $((n > 16 ? 16 : n))
-}
-
-# thread-env prints the environment variable that caps the threads of a
-# language's default formatter, for formatters that start one thread per CPU.
-function thread-env {
-  case "$1" in
-    Go) echo GOMAXPROCS ;;
-    Python) echo RAYON_NUM_THREADS ;;
-  esac
 }
 
 # run-batches <files> <jobs> <batch> <command...> runs command over files in
@@ -334,15 +331,22 @@ function run-batches {
 }
 
 # format-files <files> <lang> <command...> runs command over files, writing the
-# formatter's stdout to stdout. Large sets run as parallel batches within the
-# CPU budget. Formatters that start one thread per CPU get their threads capped
-# to the budget, and run 4 batches at a time with an equal share each, which was
-# faster than one process with every thread.
+# formatter's stdout to stdout. With a CPU budget, large sets run as parallel
+# batches. Formatters that start one thread per CPU get their threads capped to
+# the budget, and run 4 batches at a time with an equal share each, which was
+# faster than one process with every thread. The formatter's thread variable
+# is $thread_env, from THREAD_ENV or {language}_thread_env in format_multirun.
+# A value the caller already set is kept.
 function format-files {
   local files="$1" lang="$2" && shift 2
   local budget count jobs batch var
   budget=$(cpu-budget)
-  var=$(thread-env "$lang")
+  if ((budget == 0)); then
+    echo "$files" | tr \\n \\0 | xargs -0 "$@"
+    return
+  fi
+  var="${thread_env:-}"
+  [[ "$var" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || var=""
   case "$lang" in
     # Each batch would start its own JVM.
     Java|Kotlin|Scala) jobs=1 ;;
@@ -350,7 +354,7 @@ function format-files {
   esac
   count=$(grep -c '' <<< "$files")
   if ((jobs < 2 || count < 2 * MIN_PARALLEL_BATCH)); then
-    if [ -n "$var" ]; then
+    if [ -n "$var" ] && [ -z "${!var:-}" ]; then
       set -- env "$var=$budget" "$@"
     fi
     echo "$files" | tr \\n \\0 | xargs -0 "$@"
@@ -358,7 +362,9 @@ function format-files {
   fi
   if [ -n "$var" ]; then
     jobs=$((budget < 4 ? budget : 4))
-    set -- env "$var=$((budget / jobs))" "$@"
+    if [ -z "${!var:-}" ]; then
+      set -- env "$var=$((budget / jobs))" "$@"
+    fi
   fi
   # About four batches per job, so one slow batch does not hold up the rest.
   batch=$(((count + jobs * 4 - 1) / (jobs * 4)))

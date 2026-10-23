@@ -284,8 +284,13 @@ MIN_PARALLEL_BATCH=64
 # RULES_LINT_FORMAT_CPUS from the caller's environment, else the `cpus` argument
 # of format_multirun, else min(online CPUs, 16). Inside a container the online
 # CPU count is the host's even when the container has a CPU limit, and the
-# formatters measured were no faster past 16.
+# formatters measured were no faster past 16. format_test sets cpus=serial,
+# which the override cannot change, because Bazel already runs tests in parallel.
 function cpu-budget {
+  if [[ "${cpus:-}" == serial ]]; then
+    echo 1
+    return
+  fi
   local n="${RULES_LINT_FORMAT_CPUS:-${cpus:-auto}}"
   if [[ "$n" =~ ^[1-9][0-9]*$ ]]; then
     echo "$n"
@@ -330,28 +335,30 @@ function run-batches {
 
 # format-files <files> <lang> <command...> runs command over files, writing the
 # formatter's stdout to stdout. Large sets run as parallel batches within the
-# CPU budget. Formatters that start one thread per CPU run 4 batches at a time,
-# each capped to an equal share of the budget, which was faster than one process
-# with every thread.
+# CPU budget. Formatters that start one thread per CPU get their threads capped
+# to the budget, and run 4 batches at a time with an equal share each, which was
+# faster than one process with every thread.
 function format-files {
   local files="$1" lang="$2" && shift 2
   local budget count jobs batch var
   budget=$(cpu-budget)
+  var=$(thread-env "$lang")
   case "$lang" in
     # Each batch would start its own JVM.
-    Java|Kotlin|Scala) budget=1 ;;
+    Java|Kotlin|Scala) jobs=1 ;;
+    *) jobs=$budget ;;
   esac
   count=$(grep -c '' <<< "$files")
-  if ((budget < 2 || count < 2 * MIN_PARALLEL_BATCH)); then
+  if ((jobs < 2 || count < 2 * MIN_PARALLEL_BATCH)); then
+    if [ -n "$var" ]; then
+      set -- env "$var=$budget" "$@"
+    fi
     echo "$files" | tr \\n \\0 | xargs -0 "$@"
     return
   fi
-  var=$(thread-env "$lang")
   if [ -n "$var" ]; then
     jobs=$((budget < 4 ? budget : 4))
     set -- env "$var=$((budget / jobs))" "$@"
-  else
-    jobs=$budget
   fi
   # About four batches per job, so one slow batch does not hold up the rest.
   batch=$(((count + jobs * 4 - 1) / (jobs * 4)))

@@ -93,6 +93,36 @@ format_multirun(
     ],
 )
 
+# format_multirun keeps its positional arguments: name, jobs, print_command,
+# disable_git_attribute_checks. positional_args_test checks what they set.
+# buildifier: disable=positional-args
+format_multirun(
+    "format_positional_3",
+    4,
+    True,
+    python = ":mock_ruff.sh",
+)
+
+# buildifier: disable=positional-args
+format_multirun(
+    "format_positional_4",
+    4,
+    False,
+    True,
+    python = ":mock_ruff.sh",
+)
+
+sh_test(
+    name = "positional_args_test",
+    srcs = ["positional_args_test.sh"],
+    data = [
+        ":format_positional_3",
+        ":format_positional_3_Python_with_ruff",
+        ":format_positional_4",
+        ":format_positional_4_Python_with_ruff",
+    ],
+)
+
 sh_test(
     name = "custom_args_test",
     srcs = ["custom_args_test.sh"],

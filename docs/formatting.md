@@ -94,6 +94,34 @@ The custom argument attributes follow the pattern `{language}_{mode}_args`:
 When custom arguments are specified, they completely replace the default arguments for that mode.
 If not specified, the built-in defaults for each formatter are used.
 
+### Formatter parallelism
+
+When a language has at least 128 files to format, its formatter runs as several processes over batches of files.
+Each language may use up to `cpus` CPUs, which defaults to the number of online CPUs, at most 16.
+Output is printed in batch order once every batch finishes, so it does not depend on timing.
+
+gofmt, gofumpt and ruff start one thread per CPU, so they run 4 batches at a time and each process gets its threads capped to an equal share: `GOMAXPROCS` for Go, `RAYON_NUM_THREADS` for Python.
+Java, Kotlin and Scala formatters always run as one process, since each batch would start its own JVM.
+
+Set the budget in `format_multirun`, or with the `RULES_LINT_FORMAT_CPUS` environment variable when you run it, which takes precedence:
+
+```starlark
+format_multirun(
+    name = "format",
+    # Run each formatter as a single process, as before.
+    cpus = 1,
+    python = "@aspect_rules_lint//format:ruff",
+)
+```
+
+```shell
+RULES_LINT_FORMAT_CPUS=8 bazel run //:format.check
+```
+
+Inside a container, the online CPU count is the host's even when the container has a CPU limit.
+Set `cpus` or `RULES_LINT_FORMAT_CPUS` to the limit there.
+`format_test` always runs each formatter as one process, because Bazel already runs tests in parallel.
+
 ### One-time re-format all files
 
 Assuming you installed with the typical layout:

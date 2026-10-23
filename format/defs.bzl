@@ -20,7 +20,7 @@ load("@rules_multirun//:defs.bzl", "command", "multirun")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//format/private:formatter_binary.bzl", "BUILTIN_TOOL_LABELS", "CHECK_FLAGS", "FIX_FLAGS", "TOOLS", "to_attribute_name")
 
-def _format_attr_factory(target_name, lang, toolname, tool_label, mode, disable_git_attribute_checks, custom_args = None, fix_target_label = None):
+def _format_attr_factory(target_name, lang, toolname, tool_label, mode, disable_git_attribute_checks, custom_args = None, fix_target_label = None, cpus = None):
     if mode not in ["check", "fix", "test"]:
         fail("Invalid mode", mode)
 
@@ -52,6 +52,7 @@ def _format_attr_factory(target_name, lang, toolname, tool_label, mode, disable_
             "flags": flags,
             "mode": "check" if mode == "test" else mode,
             "disable_git_attribute_checks": "true" if disable_git_attribute_checks else "false",
+            "cpus": str(cpus) if cpus else "auto",
         },
         "data": [tool_label],
         ("args" if mode == "test" else "arguments"): args,
@@ -83,7 +84,7 @@ Some languages have dialects:
     },
 )
 
-def format_multirun(name, jobs = 4, print_command = False, disable_git_attribute_checks = False, **kwargs):
+def format_multirun(name, jobs = 4, cpus = None, print_command = False, disable_git_attribute_checks = False, **kwargs):
     """Create a [multirun] binary for the given languages.
 
     Intended to be used with `bazel run` to update source files in-place.
@@ -98,6 +99,11 @@ def format_multirun(name, jobs = 4, print_command = False, disable_git_attribute
     Args:
         name: name of the resulting target, typically "format"
         jobs: how many language formatters to spawn in parallel, ideally matching how many CPUs are available
+        cpus: how many CPUs each language's formatter may use. With enough files, a formatter runs as
+            several processes over batches of files, and Go and Python formatters get their threads
+            capped to a share of this budget. `None` uses min(online CPUs, 16); `1` runs every
+            formatter as one serial process. The `RULES_LINT_FORMAT_CPUS` environment variable
+            overrides this at run time, for example in CI.
         print_command: whether to print a progress message before calling the formatter of each language.
             Note that a line is printed for a formatter even if no files of that language are to be formatted.
         disable_git_attribute_checks: Set to True to disable honoring .gitattributes filters
@@ -105,6 +111,9 @@ def format_multirun(name, jobs = 4, print_command = False, disable_git_attribute
             Additionally supports custom arguments via {language}_fix_args and {language}_check_args
             to override default formatter flags for fix and check modes respectively.
     """
+    if cpus != None and (type(cpus) != "int" or cpus < 1):
+        fail("cpus must be None or a positive integer, got", cpus)
+
     commands = []
 
     common_attrs = propagate_common_rule_attributes(kwargs)
@@ -117,7 +126,7 @@ def format_multirun(name, jobs = 4, print_command = False, disable_git_attribute
                 command = Label("@aspect_rules_lint//format/private:format"),
                 description = "Formatting {} with {}...".format(lang, toolname),
                 tags = common_attrs.get("tags", []),
-                **_format_attr_factory(target_name, lang, toolname, tool_label, mode, disable_git_attribute_checks, custom_args)
+                **_format_attr_factory(target_name, lang, toolname, tool_label, mode, disable_git_attribute_checks, custom_args, cpus = cpus)
             )
         commands.append(target_name)
 
@@ -193,7 +202,9 @@ def format_test(name, srcs = None, workspace = None, no_sandbox = False, disable
         fix_target_label = None
         if fix_label:
             fix_target_label = "//{}:{}".format(fix_label.package, _format_target_name(fix_label.name, lang, toolname))
-        attrs = _format_attr_factory(target_name, lang, toolname, tool_label, "test", disable_git_attribute_checks, custom_args, fix_target_label = fix_target_label)
+
+        # Bazel already runs tests in parallel, so each test formats its files serially.
+        attrs = _format_attr_factory(target_name, lang, toolname, tool_label, "test", disable_git_attribute_checks, custom_args, fix_target_label = fix_target_label, cpus = 1)
         if srcs_label:
             attrs["data"] = [tool_label, srcs_label]
             attrs["args"] = ["$(locations {})".format(srcs_label)]

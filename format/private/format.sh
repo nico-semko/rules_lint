@@ -275,6 +275,92 @@ function ls-files {
   fi
 }
 
+# A formatter runs as one serial xargs call unless it has at least twice this
+# many files. Small sets, such as the files changed in one commit, gain nothing
+# from extra processes.
+MIN_PARALLEL_BATCH=64
+
+# cpu-budget prints how many CPUs one language's formatter may use:
+# RULES_LINT_FORMAT_CPUS from the caller's environment, else the `cpus` argument
+# of format_multirun, else min(online CPUs, 16). Inside a container the online
+# CPU count is the host's even when the container has a CPU limit, and the
+# formatters measured were no faster past 16.
+function cpu-budget {
+  local n="${RULES_LINT_FORMAT_CPUS:-${cpus:-auto}}"
+  if [[ "$n" =~ ^[1-9][0-9]*$ ]]; then
+    echo "$n"
+    return
+  fi
+  n=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)
+  [[ "$n" =~ ^[1-9][0-9]*$ ]] || n=1
+  echo $((n > 16 ? 16 : n))
+}
+
+# thread-env prints the environment variable that caps the threads of a
+# language's default formatter, for formatters that start one thread per CPU.
+function thread-env {
+  case "$1" in
+    Go) echo GOMAXPROCS ;;
+    Python) echo RAYON_NUM_THREADS ;;
+  esac
+}
+
+# run-batches <files> <jobs> <batch> <command...> runs command over files in
+# batches of <batch> files, <jobs> batches at a time. Each batch's stdout and
+# stderr are printed in batch order after all batches finish, so output from
+# different batches never interleaves and does not depend on timing. Fails like
+# xargs when any batch fails.
+function run-batches {
+  local files="$1" jobs="$2" batch="$3" && shift 3
+  local dir f code=0
+  dir=$(mktemp -d)
+  echo "$files" | split -l "$batch" -a 4 - "$dir/batch."
+  printf '%s\0' "$dir"/batch.* | xargs -0 -n 1 -P "$jobs" bash -c '
+    set -o pipefail
+    f="${!#}"
+    tr "\n" "\0" < "$f" | xargs -0 "${@:1:$#-1}" > "$f.out" 2> "$f.err"
+  ' _ "$@" || code=$?
+  for f in "$dir"/batch.????; do
+    cat "$f.out"
+    cat "$f.err" >&2
+  done
+  rm -rf "$dir"
+  return $code
+}
+
+# format-files <files> <lang> <command...> runs command over files, writing the
+# formatter's stdout to stdout. Large sets run as parallel batches within the
+# CPU budget. Formatters that start one thread per CPU run 4 batches at a time,
+# each capped to an equal share of the budget, which was faster than one process
+# with every thread.
+function format-files {
+  local files="$1" lang="$2" && shift 2
+  local budget count jobs batch var
+  budget=$(cpu-budget)
+  case "$lang" in
+    # Each batch would start its own JVM.
+    Java|Kotlin|Scala) budget=1 ;;
+  esac
+  count=$(grep -c '' <<< "$files")
+  if ((budget < 2 || count < 2 * MIN_PARALLEL_BATCH)); then
+    echo "$files" | tr \\n \\0 | xargs -0 "$@"
+    return
+  fi
+  var=$(thread-env "$lang")
+  if [ -n "$var" ]; then
+    jobs=$((budget < 4 ? budget : 4))
+    set -- env "$var=$((budget / jobs))" "$@"
+  else
+    jobs=$budget
+  fi
+  # About four batches per job, so one slow batch does not hold up the rest.
+  batch=$(((count + jobs * 4 - 1) / (jobs * 4)))
+  if ((batch < MIN_PARALLEL_BATCH)); then
+    batch=$MIN_PARALLEL_BATCH
+  fi
+  run-batches "$files" "$jobs" "$batch" "$@"
+}
+
 function time-run {
   local files="$1" && shift
   local bin="$1" && shift
@@ -284,7 +370,7 @@ function time-run {
 
   if [ $silent != 0 ] ; then 2>/dev/null ; fi
   time {
-    echo "$files" | tr \\n \\0 | xargs -0 "$bin" "$@" >&2
+    format-files "$files" "$lang" "$bin" "$@" >&2
   }
 }
 
@@ -310,7 +396,7 @@ function run-format {
         if [[ "${mode:-}" == "check" ]]; then
           GOFMT_OUT=$(mktemp)
           time {
-            echo "$files" | tr \\n \\0 | xargs -0 "$bin" $args > "$GOFMT_OUT"
+            format-files "$files" "$lang" "$bin" $args > "$GOFMT_OUT"
           }
           NEED_FMT="$(cat $GOFMT_OUT)"
           rm $GOFMT_OUT

@@ -11,6 +11,12 @@ sh_test(
     data = ["//format/private:format"],
 )
 
+sh_test(
+    name = "parallel_test",
+    srcs = ["parallel_test.sh"],
+    data = ["//format/private:format"],
+)
+
 UNIQUE_TOOLS = sets.to_list(sets.make(TOOLS.values()))
 
 # Avoid depending on a bunch of actual tools in the root module.
